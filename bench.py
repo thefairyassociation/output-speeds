@@ -8,7 +8,7 @@ Per run we stream one response and record:
   reasoning    reasoning/thinking tokens (OpenAI reports these; for Claude it is
                output_tokens minus counted visible tokens)
 
-Usage: python bench.py [--runs N] [--fast] [--only anthropic|openai] [--out results.jsonl]
+Usage: python bench.py [--runs N] [--fast] [--models a,b] [--efforts low,high] [--only anthropic|openai] [--out results.jsonl]
 """
 
 import argparse
@@ -168,22 +168,32 @@ def main():
     ap.add_argument("--only", choices=["anthropic", "openai"])
     ap.add_argument("--out", default="results.jsonl")
     ap.add_argument("--fast", action="store_true", help="Claude speed=fast (Opus 5.5 only) / OpenAI service_tier=fast")
+    ap.add_argument("--models", help="comma-separated model IDs to test instead of the defaults; "
+                    "provider is inferred (claude-* -> anthropic, else openai)")
+    ap.add_argument("--efforts", help="comma-separated effort levels (default: low,medium,high,xhigh)")
     ap.add_argument("--summarize", action="store_true", help="only print a summary of --out")
     a = ap.parse_args()
-    global FAST
+    global FAST, EFFORTS
     FAST = a.fast
+    if a.efforts:
+        EFFORTS = a.efforts.split(",")
 
     if a.summarize:
         summarize([json.loads(l) for l in open(a.out)])
         return
 
     jobs = []
-    if a.only != "openai":
+    if a.models:
+        for m in a.models.split(","):
+            jobs.append(("anthropic" if m.startswith("claude") else "openai", m))
+        if any(p == "anthropic" for p, _ in jobs) and not anthropic_key():
+            sys.exit("Claude model requested but no ANTHROPIC_API_KEY / BENCH_ANTHROPIC_API_KEY set.")
+    elif a.only != "openai":
         if anthropic_key():
             jobs += [("anthropic", m) for m in CLAUDE_MODELS if not FAST or m in CLAUDE_FAST_MODELS]
         else:
             print("No ANTHROPIC_API_KEY / BENCH_ANTHROPIC_API_KEY set; skipping Claude models.", file=sys.stderr)
-    if a.only != "anthropic":
+    if not a.models and a.only != "anthropic":
         jobs += [("openai", m) for m in OPENAI_MODELS]
 
     # One thread per model; runs within a model are sequential.
