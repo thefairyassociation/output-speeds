@@ -8,7 +8,7 @@ Per run we stream one response and record:
   reasoning    reasoning/thinking tokens (OpenAI reports these; for Claude it is
                output_tokens minus counted visible tokens)
 
-Usage: python bench.py [--runs N] [--only anthropic|openai] [--out results.jsonl]
+Usage: python bench.py [--runs N] [--fast] [--only anthropic|openai] [--out results.jsonl]
 """
 
 import argparse
@@ -26,6 +26,8 @@ PROMPT = (
 )
 EFFORTS = ["low", "medium", "high", "xhigh"]
 MAX_TOKENS = 32000
+FAST = False  # set by --fast
+CLAUDE_FAST_MODELS = {"claude-opus-5-5"}  # fast mode is Opus 5.5 only
 
 CLAUDE_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 OPENAI_MODELS = ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra", "gpt-6-luna"]
@@ -45,6 +47,7 @@ def run_claude(client, model, effort):
         thinking={"type": "adaptive"},
         output_config={"effort": effort},
         messages=[{"role": "user", "content": PROMPT}],
+        **({"speed": "fast"} if FAST else {}),
     ) as stream:
         for ev in stream:
             if ev.type == "content_block_delta" and ev.delta.type == "text_delta":
@@ -64,6 +67,7 @@ def run_claude(client, model, effort):
         stop=msg.stop_reason, t0=t0, first=first, last=last, end=t_end,
         visible_tokens=visible, total_out=total_out,
         reasoning=max(total_out - visible, 0), chars=len(body),
+        tier=getattr(msg.usage, "speed", None) or "standard",
     )
 
 
@@ -75,6 +79,7 @@ def run_openai(client, model, effort):
     stream = client.responses.create(
         model=model, input=PROMPT, reasoning={"effort": effort},
         max_output_tokens=MAX_TOKENS, stream=True,
+        **({"service_tier": "fast"} if FAST else {}),
     )
     for ev in stream:
         if ev.type == "response.output_text.delta":
@@ -91,6 +96,7 @@ def run_openai(client, model, effort):
         stop=final.status, t0=t0, first=first, last=last, end=t_end,
         visible_tokens=u.output_tokens - reasoning, total_out=u.output_tokens,
         reasoning=reasoning, chars=len("".join(text)),
+        tier=final.service_tier,
     )
 
 
@@ -104,7 +110,7 @@ def metrics(r):
         out_char_s=round(r["chars"] / span, 1) if span > 0.05 else None,
         e2e_tok_s=round(r["total_out"] / total, 1),
         visible_tokens=r["visible_tokens"], reasoning_tokens=r["reasoning"],
-        total_out=r["total_out"], chars=r["chars"], stop=r["stop"],
+        total_out=r["total_out"], chars=r["chars"], stop=r["stop"], tier=r["tier"],
     )
 
 
@@ -161,8 +167,11 @@ def main():
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--only", choices=["anthropic", "openai"])
     ap.add_argument("--out", default="results.jsonl")
+    ap.add_argument("--fast", action="store_true", help="Claude speed=fast (Opus 5.5 only) / OpenAI service_tier=fast")
     ap.add_argument("--summarize", action="store_true", help="only print a summary of --out")
     a = ap.parse_args()
+    global FAST
+    FAST = a.fast
 
     if a.summarize:
         summarize([json.loads(l) for l in open(a.out)])
@@ -171,7 +180,7 @@ def main():
     jobs = []
     if a.only != "openai":
         if anthropic_key():
-            jobs += [("anthropic", m) for m in CLAUDE_MODELS]
+            jobs += [("anthropic", m) for m in CLAUDE_MODELS if not FAST or m in CLAUDE_FAST_MODELS]
         else:
             print("No ANTHROPIC_API_KEY / BENCH_ANTHROPIC_API_KEY set; skipping Claude models.", file=sys.stderr)
     if a.only != "anthropic":
